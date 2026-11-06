@@ -24,6 +24,7 @@
 #include "chrono/solver/ChVariablesGeneric.h"
 #include <complex>
 #include <iomanip>
+#include <type_traits>
 
 namespace chrono {
 namespace modal {
@@ -802,7 +803,17 @@ bool ChModalAssembly::ComputeModesExternalData(const ChSparseMatrix& full_M,
     // - Must work also in free-free cases, with 6 rigid body modes at 0 frequency.
 
     m_timer_modal_solver_call.start();
-    modal_solver.Solve(full_K, full_M, full_Cq, m_modal_eigvect, m_modal_eigvals, m_modal_freq);
+    if constexpr (std::is_same_v<typename EigensolverType::ScalarType, double>) {
+        // A symmetric eigensolver: the undamped problem is real and symmetric, and solving it so takes a real
+        // factorization where the complex one took four times as long
+        ChMatrixDynamic<double> vectors;
+        ChVectorDynamic<double> values;
+        modal_solver.Solve(full_K, full_M, full_Cq, vectors, values, m_modal_freq);
+        m_modal_eigvect = vectors.cast<std::complex<double>>();
+        m_modal_eigvals = values.cast<std::complex<double>>();
+    } else {
+        modal_solver.Solve(full_K, full_M, full_Cq, m_modal_eigvect, m_modal_eigvals, m_modal_freq);
+    }
     m_timer_modal_solver_call.stop();
 
     return true;
