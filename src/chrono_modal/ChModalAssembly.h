@@ -112,6 +112,11 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// Get the floating frame F of the reduced modal assembly.
     ChFrameMoving<> GetFloatingFrameOfReference() { return floating_frame_F; }
 
+    /// Set the floating frame F, where the next update's Newton iterations for it start. For a state taken back (a
+    /// step taken again from its start): F is not in the state, and a step that ran off left it not finite, every
+    /// update after starting from there and staying so.
+    void SetFloatingFrameOfReference(const ChFrameMoving<>& frame) { floating_frame_F = frame; }
+
     /// The floating frame F's acceleration: its linear one, absolute, then its angular one in F's axes, as F's
     /// velocity is taken from the boundary's and the modes' (P_F Q_0, UpdateFloatingFrameOfReference()), from their
     /// accelerations; the rate of that map, a small deformation's, left out. Only when reduced (boundary bodies).
