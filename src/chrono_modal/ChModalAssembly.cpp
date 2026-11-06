@@ -2523,10 +2523,15 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
             g_acc_loc.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
 
             unsigned int offset_loc = 0;
+            // Where each item's translation is: an xyz node has 3 coordinates, a
+            // body or an xyzrot node 6 (taking every item as 6 left every other
+            // xyz node without its weight, and the rest's misplaced)
+            std::vector<unsigned int> offsets_transl;
             ChVector3d gloc = floating_frame_F.GetRot().RotateBack(GetSystem()->GetGravitationalAcceleration());
             // boundary bodies
             for (unsigned int ip = 0; ip < bodylist.size(); ++ip) {
                 g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
+                offsets_transl.push_back(offset_loc);
                 offset_loc += bodylist[ip]->GetNumCoordsVelLevel();
             }
             // boundary nodes
@@ -2534,10 +2539,12 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
                 for (auto& node : meshlist[ip]->GetNodes()) {
                     if (auto xyz = std::dynamic_pointer_cast<ChNodeFEAxyz>(node)) {
                         g_acc_loc.segment(offset_loc, xyz->GetNumCoordsVelLevel()) = gloc.eigen();
+                        offsets_transl.push_back(offset_loc);
                         offset_loc += xyz->GetNumCoordsVelLevel();
                     }
                     if (auto xyzrot = std::dynamic_pointer_cast<ChNodeFEAxyzrot>(node)) {
                         g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
+                        offsets_transl.push_back(offset_loc);
                         offset_loc += xyzrot->GetNumCoordsVelLevel();
                     }
                 }
@@ -2545,6 +2552,7 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
             // internal bodies
             for (unsigned int ip = 0; ip < internal_bodylist.size(); ++ip) {
                 g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
+                offsets_transl.push_back(offset_loc);
                 offset_loc += internal_bodylist[ip]->GetNumCoordsVelLevel();
             }
             // internal nodes
@@ -2552,10 +2560,12 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
                 for (auto& node : internal_meshlist[ip]->GetNodes()) {
                     if (auto xyz = std::dynamic_pointer_cast<ChNodeFEAxyz>(node)) {
                         g_acc_loc.segment(offset_loc, xyz->GetNumCoordsVelLevel()) = gloc.eigen();
+                        offsets_transl.push_back(offset_loc);
                         offset_loc += xyz->GetNumCoordsVelLevel();
                     }
                     if (auto xyzrot = std::dynamic_pointer_cast<ChNodeFEAxyzrot>(node)) {
                         g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
+                        offsets_transl.push_back(offset_loc);
                         offset_loc += xyzrot->GetNumCoordsVelLevel();
                     }
                 }
@@ -2565,9 +2575,8 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
             ChVectorDynamic<> f_gravity;
             f_gravity.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
             ChVectorDynamic<> f_gravity_loc = full_M_loc * g_acc_loc;
-            for (unsigned int i_node = 0; i_node < f_gravity.size() / 6; ++i_node)
-                f_gravity.segment(6 * i_node, 3) =
-                    floating_frame_F.GetRot().Rotate(f_gravity_loc.segment(6 * i_node, 3)).eigen();
+            for (unsigned int at : offsets_transl)
+                f_gravity.segment(at, 3) = floating_frame_F.GetRot().Rotate(f_gravity_loc.segment(at, 3)).eigen();
 
             // only add the gravitational forces for internal part since it has been inherited from the parent methods
             // for the boundary part
