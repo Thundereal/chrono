@@ -131,24 +131,24 @@ void util_sparse_assembly_2x2symm(ChSparseMatrix& HCQ,       // resulting square
                                   bool resize_and_reserve = true) {
     unsigned int n_v = H.rows();
     unsigned int n_c = Cq.rows();
-    if (resize_and_reserve) {
-        HCQ.resize(n_v + n_c, n_v + n_c);
-        HCQ.reserve(H.nonZeros() + 2 * Cq.nonZeros());
-    }
-    HCQ.setZero();
+    // From triplets: inserted one at a time, Cq' out of order, into a matrix whose setZero() undid the reserve() before
+    // it, a mesh of 3000 coordinates took seconds. resize_and_reserve is moot: the matrix is sized here.
+    std::vector<Eigen::Triplet<double>> t;
+    t.reserve(H.nonZeros() + 2 * Cq.nonZeros());
 
     for (unsigned int k = 0; k < H.outerSize(); ++k)
         for (ChSparseMatrix::InnerIterator it(H, k); it; ++it) {
-            HCQ.insert(it.row(), it.col()) = it.value();
+            t.emplace_back(it.row(), it.col(), it.value());
         }
 
     for (unsigned int k = 0; k < Cq.outerSize(); ++k)
         for (ChSparseMatrix::InnerIterator it(Cq, k); it; ++it) {
-            HCQ.insert(it.row() + n_v, it.col()) = it.value();  // insert Cq
-            HCQ.insert(it.col(), it.row() + n_v) = it.value();  // insert Cq'
+            t.emplace_back(it.row() + n_v, it.col(), it.value());  // insert Cq
+            t.emplace_back(it.col(), it.row() + n_v, it.value());  // insert Cq'
         }
 
-    // This seems necessary in Release mode
+    HCQ.resize(n_v + n_c, n_v + n_c);
+    HCQ.setFromTriplets(t.begin(), t.end());
     HCQ.makeCompressed();
 
     // NOTE
@@ -170,14 +170,8 @@ void util_convert_to_colmajor(
     Eigen::SparseMatrix<double, Eigen::ColMajor, int>& H_col,  // resulting sparse matrix (column major)
     const ChSparseMatrix& H)                                   // input sparse matrix (row major)
 {
-    H_col.resize(H.rows(), H.cols());
-    H_col.reserve(H.nonZeros());
-    H_col.setZero();
-
-    for (unsigned int k = 0; k < H.outerSize(); ++k)
-        for (ChSparseMatrix::InnerIterator it(H, k); it; ++it) {
-            H_col.insert(it.row(), it.col()) = it.value();
-        }
+    // Eigen converts between the storage orders itself
+    H_col = H;
 
     // This seems necessary in Release mode
     H_col.makeCompressed();
