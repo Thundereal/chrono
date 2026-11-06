@@ -660,6 +660,25 @@ class ChApiModal ChModalAssembly : public ChAssembly {
                                                ///< force will be eventually transformed to the modal forces and applied
                                                ///< on the reduced modal assembly.
 
+    /// Where an item's coordinates are, in the order of the state, from the first of the boundary's or of the
+    /// internal ones. A body or an xyzrot node has 7 position and 6 velocity coordinates, an xyz node 3 and 3: taking
+    /// every item as the former misplaced an xyz node's, and the last ones' fell off the end.
+    struct ItemCoords {
+        unsigned int pos;   ///< its first position coordinate
+        unsigned int vel;   ///< its first velocity coordinate
+        unsigned int npos;  ///< how many position coordinates
+        unsigned int nvel;  ///< how many velocity coordinates; the first 3 a translation
+    };
+    std::vector<ItemCoords> m_coords_boundary;  ///< the boundary's bodies and nodes, set up by Setup()
+    std::vector<ItemCoords> m_coords_internal;  ///< the internal ones
+
+    /// Sets up m_coords_boundary and m_coords_internal.
+    void SetupItemCoords();
+
+    /// The internal coordinates' vector with each item's translation turned by the floating frame F: to its axes
+    /// (back), or from them; the rest kept.
+    ChVectorDynamic<> TurnInternal(const ChVectorDynamic<>& v, bool back) const;
+
     // full system matrices in the local floating frame of reference F
     ChSparseMatrix full_M_loc;
     ChSparseMatrix full_K_loc;

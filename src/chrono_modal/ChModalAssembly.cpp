@@ -410,26 +410,30 @@ void ChModalAssembly::UpdateTransformationMatrix() {
         Uloc_I.reserve(m_num_coords_vel_internal * 3);  // n_I/6 nodes, 18 nonzeros for one node
         Uloc_I.setZero();
 
-        for (unsigned int i_node = 0; i_node < m_num_coords_vel_internal / 6; i_node++) {
+        for (const auto& item : m_coords_internal) {
+            const unsigned int at = item.vel;
             for (int k = 0; k < 3; ++k)
-                Uloc_I.insert(6 * i_node + k, k) = 1.0;  // I33
+                Uloc_I.insert(at + k, k) = 1.0;  // I33
 
             ChVector3d X_I = floating_frame_F.GetRot().RotateBack(
-                ChVector3d(m_full_state_x.segment(m_num_coords_pos_boundary + 7 * i_node, 3)) -
+                ChVector3d(m_full_state_x.segment(m_num_coords_pos_boundary + item.pos, 3)) -
                 floating_frame_F.GetPos());
             // = - tilde(X_I)
-            Uloc_I.insert(6 * i_node, 4) = X_I.z();
-            Uloc_I.insert(6 * i_node, 5) = -X_I.y();
-            Uloc_I.insert(6 * i_node + 1, 3) = -X_I.z();
-            Uloc_I.insert(6 * i_node + 1, 5) = X_I.x();
-            Uloc_I.insert(6 * i_node + 2, 3) = X_I.y();
-            Uloc_I.insert(6 * i_node + 2, 4) = -X_I.x();
+            Uloc_I.insert(at, 4) = X_I.z();
+            Uloc_I.insert(at, 5) = -X_I.y();
+            Uloc_I.insert(at + 1, 3) = -X_I.z();
+            Uloc_I.insert(at + 1, 5) = X_I.x();
+            Uloc_I.insert(at + 2, 3) = X_I.y();
+            Uloc_I.insert(at + 2, 4) = -X_I.x();
+            // An xyz node has no rotation
+            if (item.npos < 7)
+                continue;
 
-            ChQuaternion<> quat_int = m_full_state_x.segment(m_num_coords_pos_boundary + 7 * i_node + 3, 4);
+            ChQuaternion<> quat_int = m_full_state_x.segment(m_num_coords_pos_boundary + item.pos + 3, 4);
             ChMatrix33 RI_F = ChMatrix33<>(quat_int.GetConjugate() * floating_frame_F.GetRot());
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
-                    Uloc_I.insert(6 * i_node + 3 + r, 3 + c) = RI_F(r, c);  // RI^T*RF
+                    Uloc_I.insert(at + 3 + r, 3 + c) = RI_F(r, c);  // RI^T*RF
         }
         Uloc_I.makeCompressed();
     }
@@ -480,15 +484,19 @@ void ChModalAssembly::ComputeLocalFullKMCqMatrices(ChSparseMatrix& full_M,
     L_BI.reserve(2 * n_v);  // n_v/6 nodes, 12 nonzeros in R_F and I33 for one node
     L_BI.setZero();
 
-    unsigned int num_coords_vel_bou_int = m_num_coords_vel_boundary + m_num_coords_vel_internal;
-    for (unsigned int i_node = 0; i_node < num_coords_vel_bou_int / 6; i_node++) {
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                L_BI.insert(6 * i_node + r, 6 * i_node + c) = floating_frame_F.GetRotMat()(r, c);  // R_F
-
-        for (int k = 0; k < 3; ++k)
-            L_BI.insert(6 * i_node + 3 + k, 6 * i_node + 3 + k) = 1.0;  // I33
-    }
+    // Each item's translation turned by R_F, the rest kept (I)
+    auto turn = [&](const std::vector<ItemCoords>& items, unsigned int start) {
+        for (const auto& item : items) {
+            const unsigned int at = start + item.vel;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    L_BI.insert(at + r, at + c) = floating_frame_F.GetRotMat()(r, c);  // R_F
+            for (unsigned int k = 3; k < item.nvel; ++k)
+                L_BI.insert(at + k, at + k) = 1.0;
+        }
+    };
+    turn(m_coords_boundary, 0);
+    turn(m_coords_internal, m_num_coords_vel_boundary);
     L_BI.makeCompressed();
 
     full_M_loc = L_BI.transpose() * full_M * L_BI;
@@ -881,11 +889,7 @@ void ChModalAssembly::UpdateStaticCorrectionMode() {
     ChVectorDynamic<> f_loc(m_num_coords_vel_internal);
     // f_loc.setOnes();//initialization
     if (!m_full_forces_internal.isZero()) {
-        for (unsigned int i_node = 0; i_node < m_num_coords_vel_internal / 6; ++i_node) {
-            f_loc.segment(6 * i_node, 3) =
-                floating_frame_F.GetRot().RotateBack(m_full_forces_internal.segment(6 * i_node, 3)).eigen();
-            f_loc.segment(6 * i_node + 3, 3) = m_full_forces_internal.segment(6 * i_node + 3, 3);
-        }
+        f_loc = TurnInternal(m_full_forces_internal, true);
     }
     // else {
     //    // todo:
@@ -1299,16 +1303,19 @@ void ChModalAssembly::UpdateInternalState(UpdateFlags update_flags) {
     assembly_x_new.setZero(num_coords_pos_bou_int, nullptr);
     assembly_x_new.head(m_num_coords_pos_boundary) = x_mod.head(m_num_coords_pos_boundary);
 
-    for (unsigned int i_int = 0; i_int < m_num_coords_vel_internal / 6; i_int++) {
-        unsigned int offset = m_num_coords_pos_boundary + 7 * i_int;
+    for (const auto& item : m_coords_internal) {
+        unsigned int offset = m_num_coords_pos_boundary + item.pos;
         ChVector3d r_IF0 = floating_frame_F0.GetRotMat().transpose() *
                            (m_full_state_x0.segment(offset, 3) - floating_frame_F0.GetPos().eigen());
         ChVector3d r_I =
-            floating_frame_F.GetPos() + floating_frame_F.GetRotMat() * (r_IF0 + Dx_internal_loc.segment(6 * i_int, 3));
+            floating_frame_F.GetPos() + floating_frame_F.GetRotMat() * (r_IF0 + Dx_internal_loc.segment(item.vel, 3));
         assembly_x_new.segment(offset, 3) = r_I.eigen();
+        // An xyz node has no rotation
+        if (item.npos < 7)
+            continue;
 
         ChQuaternion<> q_delta;
-        q_delta.SetFromRotVec(Dx_internal_loc.segment(6 * i_int + 3, 3));
+        q_delta.SetFromRotVec(Dx_internal_loc.segment(item.vel + 3, 3));
         ChQuaternion<> quat_int0 = m_full_state_x0.segment(offset + 3, 4);
         ChQuaternion<> q_refrot = floating_frame_F0.GetRot().GetConjugate() * quat_int0;
         // ChQuaternion<> quat_int = floating_frame_F.GetRot() * q_delta * q_refrot;
@@ -1330,21 +1337,12 @@ void ChModalAssembly::UpdateInternalState(UpdateFlags update_flags) {
     ChVectorDynamic<> vloc_int =
         Psi_S * vloc_bou +
         Psi_D * v_mod.segment(m_num_coords_vel_boundary, m_num_coords_modal - m_num_coords_static_correction);
-    ChVectorDynamic<> vpar_int(m_num_coords_vel_internal);
-    for (unsigned int i_node = 0; i_node < m_num_coords_vel_internal / 6; ++i_node) {
-        vpar_int.segment(6 * i_node, 3) = floating_frame_F.GetRot().Rotate(vloc_int.segment(6 * i_node, 3)).eigen();
-        vpar_int.segment(6 * i_node + 3, 3) = vloc_int.segment(6 * i_node + 3, 3);
-    }
+    ChVectorDynamic<> vpar_int = TurnInternal(vloc_int, false);
     assembly_v_new.segment(m_num_coords_vel_boundary, m_num_coords_vel_internal) = vpar_int;
     // add the contribution of the static correction mode
     if (m_num_coords_static_correction) {
         ChVectorDynamic<> vloc_int_static = Psi_Cor * v_mod.tail(m_num_coords_static_correction);
-        ChVectorDynamic<> vpar_int_static(m_num_coords_vel_internal);
-        for (unsigned int i_node = 0; i_node < m_num_coords_vel_internal / 6; ++i_node) {
-            vpar_int_static.segment(6 * i_node, 3) =
-                floating_frame_F.GetRot().Rotate(vloc_int_static.segment(6 * i_node, 3)).eigen();
-            vpar_int_static.segment(6 * i_node + 3, 3) = vloc_int_static.segment(6 * i_node + 3, 3);
-        }
+        ChVectorDynamic<> vpar_int_static = TurnInternal(vloc_int_static, false);
         assembly_v_new.segment(m_num_coords_vel_boundary, m_num_coords_vel_internal) += vpar_int_static;
     }
 
@@ -1912,6 +1910,45 @@ void ChModalAssembly::Setup() {
         m_num_constr_bil = m_num_constr_bil_boundary;
         m_num_constr_uni = m_num_constr_uni_boundary;
     }
+
+    SetupItemCoords();
+}
+
+void ChModalAssembly::SetupItemCoords() {
+    auto add = [](std::vector<ItemCoords>& items, unsigned int& pos, unsigned int& vel, unsigned int npos,
+                  unsigned int nvel) {
+        items.push_back({pos, vel, npos, nvel});
+        pos += npos;
+        vel += nvel;
+    };
+    auto addAll = [&](std::vector<ItemCoords>& items, const std::vector<std::shared_ptr<ChBody>>& bodies,
+                      const std::vector<std::shared_ptr<fea::ChMesh>>& meshes) {
+        items.clear();
+        unsigned int pos = 0;
+        unsigned int vel = 0;
+        for (auto& body : bodies) {
+            if (body->IsActive())
+                add(items, pos, vel, body->GetNumCoordsPosLevel(), body->GetNumCoordsVelLevel());
+        }
+        for (auto& mesh : meshes) {
+            for (auto& node : mesh->GetNodes())
+                add(items, pos, vel, node->GetNumCoordsPosLevel(), node->GetNumCoordsVelLevel());
+        }
+    };
+    addAll(m_coords_boundary, bodylist, meshlist);
+    addAll(m_coords_internal, internal_bodylist, internal_meshlist);
+}
+
+ChVectorDynamic<> ChModalAssembly::TurnInternal(const ChVectorDynamic<>& v, bool back) const {
+    ChVectorDynamic<> out = v;
+    for (const auto& item : m_coords_internal) {
+        if (item.vel + 3 > v.size())
+            break;
+        const ChVector3d t(v.segment(item.vel, 3));
+        out.segment(item.vel, 3) =
+            (back ? floating_frame_F.GetRot().RotateBack(t) : floating_frame_F.GetRot().Rotate(t)).eigen();
+    }
+    return out;
 }
 
 void ChModalAssembly::Initialize() {
@@ -2522,54 +2559,16 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
             ChVectorDynamic<> g_acc_loc;
             g_acc_loc.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
 
-            unsigned int offset_loc = 0;
-            // Where each item's translation is: an xyz node has 3 coordinates, a
-            // body or an xyzrot node 6 (taking every item as 6 left every other
-            // xyz node without its weight, and the rest's misplaced)
+            // Each item's translation (m_coords_boundary, m_coords_internal): taking every item as a body's 6
+            // coordinates left every other xyz node without its weight, and the rest's misplaced
             std::vector<unsigned int> offsets_transl;
+            for (const auto& item : m_coords_boundary)
+                offsets_transl.push_back(item.vel);
+            for (const auto& item : m_coords_internal)
+                offsets_transl.push_back(m_num_coords_vel_boundary + item.vel);
             ChVector3d gloc = floating_frame_F.GetRot().RotateBack(GetSystem()->GetGravitationalAcceleration());
-            // boundary bodies
-            for (unsigned int ip = 0; ip < bodylist.size(); ++ip) {
-                g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
-                offsets_transl.push_back(offset_loc);
-                offset_loc += bodylist[ip]->GetNumCoordsVelLevel();
-            }
-            // boundary nodes
-            for (unsigned int ip = 0; ip < meshlist.size(); ++ip) {
-                for (auto& node : meshlist[ip]->GetNodes()) {
-                    if (auto xyz = std::dynamic_pointer_cast<ChNodeFEAxyz>(node)) {
-                        g_acc_loc.segment(offset_loc, xyz->GetNumCoordsVelLevel()) = gloc.eigen();
-                        offsets_transl.push_back(offset_loc);
-                        offset_loc += xyz->GetNumCoordsVelLevel();
-                    }
-                    if (auto xyzrot = std::dynamic_pointer_cast<ChNodeFEAxyzrot>(node)) {
-                        g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
-                        offsets_transl.push_back(offset_loc);
-                        offset_loc += xyzrot->GetNumCoordsVelLevel();
-                    }
-                }
-            }
-            // internal bodies
-            for (unsigned int ip = 0; ip < internal_bodylist.size(); ++ip) {
-                g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
-                offsets_transl.push_back(offset_loc);
-                offset_loc += internal_bodylist[ip]->GetNumCoordsVelLevel();
-            }
-            // internal nodes
-            for (unsigned int ip = 0; ip < internal_meshlist.size(); ++ip) {
-                for (auto& node : internal_meshlist[ip]->GetNodes()) {
-                    if (auto xyz = std::dynamic_pointer_cast<ChNodeFEAxyz>(node)) {
-                        g_acc_loc.segment(offset_loc, xyz->GetNumCoordsVelLevel()) = gloc.eigen();
-                        offsets_transl.push_back(offset_loc);
-                        offset_loc += xyz->GetNumCoordsVelLevel();
-                    }
-                    if (auto xyzrot = std::dynamic_pointer_cast<ChNodeFEAxyzrot>(node)) {
-                        g_acc_loc.segment(offset_loc, 3) = gloc.eigen();
-                        offsets_transl.push_back(offset_loc);
-                        offset_loc += xyzrot->GetNumCoordsVelLevel();
-                    }
-                }
-            }
+            for (unsigned int at : offsets_transl)
+                g_acc_loc.segment(at, 3) = gloc.eigen();
 
             // gravitational forces for all boundary and internal items
             ChVectorDynamic<> f_gravity;
@@ -2597,12 +2596,7 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
         // 5-
         // Add the collected forces of internal items (bodies, nodes) on the generalized coordinates
         if (!m_full_forces_internal.isZero()) {
-            ChVectorDynamic<> f_loc(m_num_coords_vel_internal);
-            for (unsigned int i_node = 0; i_node < m_num_coords_vel_internal / 6; ++i_node) {
-                f_loc.segment(6 * i_node, 3) =
-                    floating_frame_F.GetRot().RotateBack(m_full_forces_internal.segment(6 * i_node, 3)).eigen();
-                f_loc.segment(6 * i_node + 3, 3) = m_full_forces_internal.segment(6 * i_node + 3, 3);
-            }
+            ChVectorDynamic<> f_loc = TurnInternal(m_full_forces_internal, true);
 
             ChVectorDynamic<> f_reduced(m_num_coords_vel_boundary + m_num_coords_modal);
             f_reduced.setZero();
