@@ -37,6 +37,22 @@ void ChApiModal BuildUndampedEigenProblemMatrices(ChAssembly& assembly,
                                                   ChSparseMatrix& B,
                                                   int n_vars);
 
+/// The undamped problem's eigenvalue, A = [-K -Cq'; -Cq 0] against B = [M 0; 0 0], is -w^2 whichever eigensolver
+/// finds it: the shift that finds the modes about a frequency, and an eigenvalue's frequency. The unsymmetric
+/// solvers' own GetOptimalShift() and GetNaturalFrequency() are those of the damped problem in state space, whose
+/// eigenvalue is i w: taken here, the undamped modes came out at w^2 / 2 pi.
+template <typename ScalarType>
+ScalarType UndampedShift(double frequency) {
+    return ScalarType(-std::pow(frequency * CH_2PI, 2));
+}
+
+template <typename ScalarType>
+void UndampedFrequencies(const ChVectorDynamic<ScalarType>& eigvals, ChVectorDynamic<double>& freq) {
+    freq.resize(eigvals.size());
+    for (auto i = 0; i < eigvals.size(); i++)
+        freq(i) = std::sqrt(std::abs(eigvals(i))) / CH_2PI;
+}
+
 /// Modal solver for undamped systems (-w^2*M+K)*x = 0 s.t. Cq*x = 0
 /// Contrary to eigensolvers, these classes deals directly with Chrono data structures, creating the appropriate setup
 /// for running the inner eigensolver.
@@ -186,7 +202,7 @@ int ChModalSolverUndamped<EigenvalueSolverType>::Solve(const ChAssembly& assembl
 
     std::list<std::pair<int, ScalarType>> eig_requests;
     for (int i = 0; i < m_freq_spans.size(); i++) {
-        eig_requests.push_back(std::make_pair(m_freq_spans[i].nmodes, m_solver->GetOptimalShift(m_freq_spans[i].freq)));
+        eig_requests.push_back(std::make_pair(m_freq_spans[i].nmodes, UndampedShift<ScalarType>(m_freq_spans[i].freq)));
     }
 
     m_timer_matrix_assembly.stop();
@@ -203,7 +219,7 @@ int ChModalSolverUndamped<EigenvalueSolverType>::Solve(const ChAssembly& assembl
     m_timer_eigen_solver.stop();
 
     m_timer_solution_postprocessing.start();
-    m_solver->GetNaturalFrequencies(eigvals, freq);
+    UndampedFrequencies(eigvals, freq);
     m_timer_solution_postprocessing.stop();
 
     if (descriptor_bkp) {
@@ -233,7 +249,7 @@ int ChModalSolverUndamped<EigenvalueSolverType>::Solve(const ChSparseMatrix& K,
 
     std::list<std::pair<int, ScalarType>> eig_requests;
     for (int i = 0; i < m_freq_spans.size(); i++) {
-        eig_requests.push_back(std::make_pair(m_freq_spans[i].nmodes, m_solver->GetOptimalShift(m_freq_spans[i].freq)));
+        eig_requests.push_back(std::make_pair(m_freq_spans[i].nmodes, UndampedShift<ScalarType>(m_freq_spans[i].freq)));
     }
 
     m_timer_matrix_assembly.stop();
@@ -249,7 +265,7 @@ int ChModalSolverUndamped<EigenvalueSolverType>::Solve(const ChSparseMatrix& K,
     m_timer_eigen_solver.stop();
 
     m_timer_solution_postprocessing.start();
-    m_solver->GetNaturalFrequencies(eigvals, freq);
+    UndampedFrequencies(eigvals, freq);
     m_timer_solution_postprocessing.stop();
 
     return found_eigs;
