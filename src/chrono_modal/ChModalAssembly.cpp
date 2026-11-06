@@ -1908,6 +1908,29 @@ void ChModalAssembly::Setup() {
     SetupItemCoords();
 }
 
+ChVectorDynamic<> ChModalAssembly::GetFloatingFrameAccelerations() const {
+    ChVectorDynamic<> acc_F(6);
+    acc_F.setZero();
+    if (!m_is_model_reduced || Q_0.cols() != m_num_coords_vel_boundary + m_num_coords_modal)
+        return acc_F;
+    // The boundary's accelerations in F's axes, the angular ones in each body's own, as its velocities in
+    // UpdateFloatingFrameOfReference(); the modes' as they are
+    ChVectorDynamic<> a_loc(m_num_coords_vel_boundary + m_num_coords_modal);
+    a_loc.setZero();
+    unsigned int at = 0;
+    for (auto& body : bodylist) {
+        if (!body->IsActive())
+            continue;
+        a_loc.segment(at, 3) = floating_frame_F.GetRot().RotateBack(body->GetPosDt2()).eigen();
+        a_loc.segment(at + 3, 3) = body->GetAngAccLocal().eigen();
+        at += 6;
+    }
+    if (modal_q_dtdt.size() == m_num_coords_modal)
+        a_loc.tail(m_num_coords_modal) = modal_q_dtdt;
+    acc_F = P_F * (Q_0 * a_loc);
+    return acc_F;
+}
+
 void ChModalAssembly::SetupItemCoords() {
     auto add = [](std::vector<ItemCoords>& items, unsigned int& pos, unsigned int& vel, unsigned int npos,
                   unsigned int nvel) {

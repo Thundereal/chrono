@@ -111,6 +111,11 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// Get the floating frame F of the reduced modal assembly.
     ChFrameMoving<> GetFloatingFrameOfReference() { return floating_frame_F; }
 
+    /// The floating frame F's acceleration: its linear one, absolute, then its angular one in F's axes, as F's
+    /// velocity is taken from the boundary's and the modes' (P_F Q_0, UpdateFloatingFrameOfReference()), from their
+    /// accelerations; the rate of that map, a small deformation's, left out. Only when reduced (boundary bodies).
+    ChVectorDynamic<> GetFloatingFrameAccelerations() const;
+
     /// Get the residual of constraint equations on the floating frame F.
     /// The configuration of the floating frame F is determined by the six constraint equations using a Newton-Raphson
     /// iteration. The residual of constraint equations is an indicator to check the convergence of the modal method.
