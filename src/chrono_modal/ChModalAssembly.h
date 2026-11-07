@@ -693,7 +693,7 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     // full system matrices in the local floating frame of reference F
     ChSparseMatrix full_M_loc;
     ChSparseMatrix full_K_loc;
-    ChSparseMatrix full_R_loc;
+    ChSparseMatrix full_R_loc;  // not assembled: nothing reads it (ComputeLocalFullKMCqMatrices())
     ChSparseMatrix full_Cq_loc;
 
     // the extended K M R matrices for modal assembly with constraints
