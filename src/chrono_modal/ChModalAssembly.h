@@ -117,6 +117,15 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// update after starting from there and staying so.
     void SetFloatingFrameOfReference(const ChFrameMoving<>& frame) { floating_frame_F = frame; }
 
+    /// Set the axes the floating frame F starts with, before the reduction (Initialize()), in place of the principal
+    /// axes of inertia: their order and signs are the eigensolver's, and a symmetric section's are any, so the same part
+    /// placed elsewhere would make its local matrices in other axes. Given the part's own, they are the same wherever
+    /// it starts -- for a reduction that keeps an earlier one's modes. F's origin stays the center of mass.
+    void SetFloatingFrameAxes(const ChQuaterniond& axes) {
+        floating_frame_axes = axes;
+        floating_frame_axes_given = true;
+    }
+
     /// The floating frame F's acceleration: its linear one, absolute, then its angular one in F's axes, as F's
     /// velocity is taken from the boundary's and the modes' (P_F Q_0, UpdateFloatingFrameOfReference()), from their
     /// accelerations; the rate of that map, a small deformation's, left out. Only when reduced (boundary bodies).
@@ -645,6 +654,8 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     ChFrameMoving<> cog_frame;          ///< center of mass frame of reference
     ChFrameMoving<> floating_frame_F0;  ///< floating frame of reference F in the initial undeformed configuration
     ChFrameMoving<> floating_frame_F;   ///< floating frame of reference F in the deformed configuration
+    ChQuaterniond floating_frame_axes;  ///< F's axes at the start, if given (SetFloatingFrameAxes())
+    bool floating_frame_axes_given = false;
     // ChFrameMoving<> floating_frame_F_old;
     ChVectorDynamic<> m_res_CF;  ///< residual of the six constraint equations on the floating frame F
     double m_tol_CF = 0;         // tolerance of the Newton-Raphson iteration in searching for the floating frame F

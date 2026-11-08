@@ -226,6 +226,11 @@ void ChModalAssembly::ComputeMassCenterFrame() {
         ChVector3d cog_x = mass_weighted_radius / mass_total;
         this->cog_frame.SetPos(cog_x);
 
+        if (floating_frame_axes_given) {
+            this->cog_frame.SetRot(floating_frame_axes.GetNormalized());
+            return;
+        }
+
         // The inertia tensor about cog, but still aligned with the absolute frame
         ChMatrix33<> inertia_cog = inertial_total - mass_total * (cog_x.Length2() * ChMatrix33<>(1.0) -
                                                                   cog_x.eigen() * cog_x.eigen().transpose());
