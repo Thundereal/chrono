@@ -841,6 +841,112 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
             this->R_red(row, col) = this->R_red(col, row);
         }
 
+    RemoveBoundaryMasses();
+
+    // Invalidate results of the initial eigenvalue analysis because now the DOFs are different after reduction,
+    // to avoid that one could be tempted to plot those eigenmodes, which now are not exactly the ones of the
+    // reduced assembly.
+    m_modal_damping_ratios.resize(0);
+    m_modal_eigvals.resize(0);
+    m_modal_freq.resize(0);
+    m_modal_eigvect.resize(0, 0);
+}
+
+void ChModalAssembly::PrepareReduction() {
+    SetupInitial();
+    Setup();
+    Update(ChTime, UpdateFlags::UPDATE_ALL);
+
+    Initialize();
+
+    // in modal reduced state, m_modal_automatic_gravity overwrites the gravity settings for both boundary and internal
+    // meshes.
+    if (m_modal_automatic_gravity) {
+        // Note: the gravity on boundary bodies (ChBody) cannot turn off via SetAutomaticGravity()!
+        for (auto& mesh_boundary : meshlist)
+            mesh_boundary->SetAutomaticGravity(false);
+        for (auto& mesh_internal : internal_meshlist)
+            mesh_internal->SetAutomaticGravity(false);
+    }
+}
+
+ChModalAssembly::ReducedData ChModalAssembly::GetReducedData() const {
+    if (!m_is_model_reduced || m_modal_reduction_type != ReductionType::CRAIG_BAMPTON ||
+        m_num_coords_static_correction)
+        throw std::runtime_error(
+            "A reduction's data are those of a Craig-Bampton reduction made, without the static correction mode.");
+    ReducedData data;
+    data.num_modes = m_num_coords_modal;
+    data.Psi = Psi;
+    data.Psi_S = Psi_S;
+    data.Psi_D = Psi_D;
+    data.Psi_S_LambdaI = Psi_S_LambdaI;
+    data.Psi_D_LambdaI = Psi_D_LambdaI;
+    data.M_red = M_red;
+    data.K_red = K_red;
+    data.R_red = R_red;
+    data.gravity_M_loc = m_gravity_M_loc;
+    data.scaling_factor_CqI = m_scaling_factor_CqI;
+    return data;
+}
+
+void ChModalAssembly::DoModalReduction(const ReducedData& data) {
+    if (m_is_model_reduced)
+        return;
+    if (m_modal_reduction_type != ReductionType::CRAIG_BAMPTON || m_num_coords_static_correction)
+        throw std::invalid_argument(
+            "A reduction's data are taken by a Craig-Bampton reduction without the static correction mode only.");
+
+    PrepareReduction();
+
+    const Eigen::Index n_B = m_num_coords_vel_boundary;
+    const Eigen::Index n_I = m_num_coords_vel_internal;
+    const Eigen::Index n_L = m_num_constr_internal;
+    const Eigen::Index n_mod = data.num_modes;
+    const Eigen::Index n_red = n_B + n_mod;
+    if (data.Psi.rows() != n_B + n_I + n_L || data.Psi.cols() != n_red || data.Psi_S.rows() != n_I ||
+        data.Psi_S.cols() != n_B || data.Psi_D.rows() != n_I || data.Psi_D.cols() != n_mod ||
+        data.M_red.rows() != n_red || data.K_red.rows() != n_red || data.R_red.rows() != n_red ||
+        data.gravity_M_loc.rows() != n_B + n_I || data.gravity_M_loc.cols() != 3)
+        throw std::invalid_argument("The reduction's data are not this assembly's: their sizes differ.");
+
+    FlagModelAsReduced();
+    SetupModalData(data.num_modes);
+    UpdateTransformationMatrix();
+
+    Psi = data.Psi;
+    Psi_S = data.Psi_S;
+    Psi_D = data.Psi_D;
+    Psi_Cor.setZero(n_I, 0);
+    if (n_L) {
+        Psi_S_LambdaI = data.Psi_S_LambdaI;
+        Psi_D_LambdaI = data.Psi_D_LambdaI;
+        Psi_Cor_LambdaI.setZero(n_L, 0);
+    }
+    M_red = data.M_red;
+    K_red = data.K_red;
+    R_red = data.R_red;
+    m_gravity_M_loc = data.gravity_M_loc;
+    m_scaling_factor_CqI = data.scaling_factor_CqI;
+
+    RemoveBoundaryMasses();
+
+    ComputeProjectionMatrix();
+    ComputeModalKRMmatricesGlobal();
+}
+
+void ChModalAssembly::ComputeGravityMass() {
+    const unsigned int n = m_num_coords_vel_boundary + m_num_coords_vel_internal;
+    ChMatrixDynamic<> unit;
+    unit.setZero(n, 3);
+    for (const auto& item : m_coords_boundary)
+        unit.block(item.vel, 0, 3, 3).setIdentity();
+    for (const auto& item : m_coords_internal)
+        unit.block(m_num_coords_vel_boundary + item.vel, 0, 3, 3).setIdentity();
+    m_gravity_M_loc = full_M_loc * unit;
+}
+
+void ChModalAssembly::RemoveBoundaryMasses() {
     // Reset to zero all the atomic masses of the boundary nodes because now their mass is represented by
     // this->modal_M.
     // NOTE! this should be made more generic and future-proof by implementing a virtual method ex.
@@ -861,14 +967,6 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
             }
         }
     }
-
-    // Invalidate results of the initial eigenvalue analysis because now the DOFs are different after reduction,
-    // to avoid that one could be tempted to plot those eigenmodes, which now are not exactly the ones of the
-    // reduced assembly.
-    m_modal_damping_ratios.resize(0);
-    m_modal_eigvals.resize(0);
-    m_modal_freq.resize(0);
-    m_modal_eigvect.resize(0, 0);
 }
 
 void ChModalAssembly::UpdateStaticCorrectionMode() {
@@ -2575,9 +2673,6 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
         // 4-
         // Update the gravitational force on the internal bodies and nodes
         if (m_modal_automatic_gravity && GetSystem()->GetGravitationalAcceleration().Length2()) {
-            ChVectorDynamic<> g_acc_loc;
-            g_acc_loc.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
-
             // Each item's translation (m_coords_boundary, m_coords_internal): taking every item as a body's 6
             // coordinates left every other xyz node without its weight, and the rest's misplaced
             std::vector<unsigned int> offsets_transl;
@@ -2586,13 +2681,12 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
             for (const auto& item : m_coords_internal)
                 offsets_transl.push_back(m_num_coords_vel_boundary + item.vel);
             ChVector3d gloc = floating_frame_F.GetRot().RotateBack(GetSystem()->GetGravitationalAcceleration());
-            for (unsigned int at : offsets_transl)
-                g_acc_loc.segment(at, 3) = gloc.eigen();
 
-            // gravitational forces for all boundary and internal items
+            // gravitational forces for all boundary and internal items: full_M_loc times gloc on every item's
+            // translation, by its three columns (m_gravity_M_loc)
             ChVectorDynamic<> f_gravity;
             f_gravity.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
-            ChVectorDynamic<> f_gravity_loc = full_M_loc * g_acc_loc;
+            ChVectorDynamic<> f_gravity_loc = m_gravity_M_loc * gloc.eigen();
             for (unsigned int at : offsets_transl)
                 f_gravity.segment(at, 3) = floating_frame_F.GetRot().Rotate(f_gravity_loc.segment(at, 3)).eigen();
 

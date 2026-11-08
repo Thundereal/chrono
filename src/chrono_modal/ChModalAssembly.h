@@ -103,6 +103,27 @@ class ChApiModal ChModalAssembly : public ChAssembly {
         const ChModalDamping& damping_model = ChModalDampingNone()  ///< damping model
     );
 
+    /// What a reduction made that does not depend on where the assembly is: its matrices are in the floating frame's
+    /// axes, which SetFloatingFrameAxes() makes the same wherever the part starts. For a Craig-Bampton reduction
+    /// without the static correction mode (which is made again at each step, from K_II's factorization).
+    struct ReducedData {
+        unsigned int num_modes = 0;  ///< the dynamic modes kept
+        ChMatrixDynamic<> Psi, Psi_S, Psi_D, Psi_S_LambdaI, Psi_D_LambdaI;
+        ChMatrixDynamic<> M_red, K_red, R_red;
+        ChMatrixDynamic<> gravity_M_loc;  ///< the local mass's gravity columns (ComputeGravityMass())
+        double scaling_factor_CqI = 1.0;
+    };
+
+    /// The reduction's data, after DoModalReduction(), for the same assembly reduced again (DoModalReduction(const
+    /// ReducedData&)).
+    ReducedData GetReducedData() const;
+
+    /// Reduce this assembly with the data of an earlier reduction of the same assembly (GetReducedData()) -- the same
+    /// items in the same order, mesh, material, boundary, damping and floating frame axes relative to them, wherever
+    /// it is placed -- without assembling its M, K and Cq again, the eigenproblem and the static and dynamic modes:
+    /// 3.5 s of a reduction of 4.5 for a mesh of 16272 coordinates. Only the sizes are checked.
+    void DoModalReduction(const ReducedData& data);
+
     /// Set a new linear solver to use for K_IIc^{-1} computation
     void SetModalSolver(std::shared_ptr<ChDirectSolverLS> newsolver);
 
@@ -590,6 +611,19 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// Both Herting and Craig-Bampton reductions are implemented in this function.
     void ApplyModeAccelerationTransformation(const ChModalDamping& damping_model = ChModalDampingNone());
 
+    /// The boundary bodies' and nodes' masses set to zero, now in the reduced M (the end of a reduction).
+    void RemoveBoundaryMasses();
+
+    /// full_M_loc times a unit acceleration along each of F's axes on every item's translation, as m_gravity_M_loc:
+    /// the modal gravity's forces, full_M_loc * g_acc_loc, are these three columns times the gravity in F's axes.
+    /// Kept so, where the product took the whole local mass at each residual (1.5 million terms for a mesh of 16272
+    /// coordinates), and a reduction's data (ReducedData) need not carry it.
+    void ComputeGravityMass();
+
+    /// A reduction's start, before its matrices: the assembly set up and initialized (its floating frame), the meshes'
+    /// own gravity off when the modal assembly's is on.
+    void PrepareReduction();
+
     /// Computes the increment of the modal assembly (the increment of the current configuration respect
     /// to the initial "undeformed" configuration), and also gets the current speed.
     /// u_locred = P_W^T*[\delta qB; \delta eta]: corotated local displacement.
@@ -703,6 +737,7 @@ class ChApiModal ChModalAssembly : public ChAssembly {
 
     // full system matrices in the local floating frame of reference F
     ChSparseMatrix full_M_loc;
+    ChMatrixDynamic<> m_gravity_M_loc;  // full_M_loc's gravity columns (ComputeGravityMass())
     ChSparseMatrix full_K_loc;
     ChSparseMatrix full_R_loc;  // not assembled: nothing reads it (ComputeLocalFullKMCqMatrices())
     ChSparseMatrix full_Cq_loc;
@@ -858,21 +893,7 @@ void ChModalAssembly::DoModalReduction(ChSparseMatrix& full_M,
     if (m_is_model_reduced)
         return;
 
-    SetupInitial();
-    Setup();
-    Update(ChTime, UpdateFlags::UPDATE_ALL);
-
-    Initialize();
-
-    // in modal reduced state, m_modal_automatic_gravity overwrites the gravity settings for both boundary and internal
-    // meshes.
-    if (m_modal_automatic_gravity) {
-        // Note: the gravity on boundary bodies (ChBody) cannot turn off via SetAutomaticGravity()!
-        for (auto& mesh_boundary : meshlist)
-            mesh_boundary->SetAutomaticGravity(false);
-        for (auto& mesh_internal : internal_meshlist)
-            mesh_internal->SetAutomaticGravity(false);
-    }
+    PrepareReduction();
 
     // recover the local M,K,Cq (full_M_loc, full_K_loc, full_Cq_loc) matrices
     // through rotating back to the local frame of F
@@ -880,6 +901,7 @@ void ChModalAssembly::DoModalReduction(ChSparseMatrix& full_M,
 
     // prepare sub-block matrices of M K R
     PartitionLocalSystemMatrices();
+    ComputeGravityMass();
 
     //// start of modal reduction transformation
     // 1) compute eigenvalue and eigenvectors
