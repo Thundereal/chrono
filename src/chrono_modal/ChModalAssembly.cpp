@@ -842,6 +842,7 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
         }
 
     RemoveBoundaryMasses();
+    ComputeGravityReduced();
 
     // Invalidate results of the initial eigenvalue analysis because now the DOFs are different after reduction,
     // to avoid that one could be tempted to plot those eigenmodes, which now are not exactly the ones of the
@@ -930,6 +931,7 @@ void ChModalAssembly::DoModalReduction(const ReducedData& data) {
     m_scaling_factor_CqI = data.scaling_factor_CqI;
 
     RemoveBoundaryMasses();
+    ComputeGravityReduced();
 
     ComputeProjectionMatrix();
     ComputeModalKRMmatricesGlobal();
@@ -944,6 +946,20 @@ void ChModalAssembly::ComputeGravityMass() {
     for (const auto& item : m_coords_internal)
         unit.block(m_num_coords_vel_boundary + item.vel, 0, 3, 3).setIdentity();
     m_gravity_M_loc = full_M_loc * unit;
+}
+
+void ChModalAssembly::ComputeGravityReduced() {
+    m_gravity_red.resize(0, 0);
+    if (m_num_coords_static_correction || m_gravity_M_loc.rows() != m_num_coords_vel_boundary + m_num_coords_vel_internal)
+        return;
+    // Each internal item's translation only, as IntLoadResidual_F() put the weight on it
+    ChMatrixDynamic<> internal;
+    internal.setZero(m_num_coords_vel_internal, 3);
+    for (const auto& item : m_coords_internal)
+        internal.block(item.vel, 0, 3, 3) = m_gravity_M_loc.block(m_num_coords_vel_boundary + item.vel, 0, 3, 3);
+    m_gravity_red.setZero(m_num_coords_vel_boundary + m_num_coords_modal, 3);
+    m_gravity_red.topRows(m_num_coords_vel_boundary) = Psi_S.transpose() * internal;
+    m_gravity_red.bottomRows(m_num_coords_modal) = Psi_D.transpose() * internal;
 }
 
 void ChModalAssembly::RemoveBoundaryMasses() {
@@ -2054,6 +2070,23 @@ void ChModalAssembly::SetupItemCoords() {
     };
     addAll(m_coords_boundary, bodylist, meshlist);
     addAll(m_coords_internal, internal_bodylist, internal_meshlist);
+
+    // The internal nodes' forces, as IntLoadResidual_F() read them: the bodies' coordinates first, then each xyz or
+    // xyzrot node's
+    m_internal_nodes.clear();
+    unsigned int vel = 0;
+    for (auto& body : internal_bodylist)
+        vel += body->GetNumCoordsVelLevel();
+    for (auto& mesh : internal_meshlist) {
+        for (auto& node : mesh->GetNodes()) {
+            auto xyz = dynamic_cast<ChNodeFEAxyz*>(node.get());
+            auto xyzrot = dynamic_cast<ChNodeFEAxyzrot*>(node.get());
+            if (!xyz && !xyzrot)
+                continue;
+            m_internal_nodes.push_back({xyz, xyzrot, vel});
+            vel += node->GetNumCoordsVelLevel();
+        }
+    }
 }
 
 ChVectorDynamic<> ChModalAssembly::TurnInternal(const ChVectorDynamic<>& v, bool back) const {
@@ -2655,17 +2688,13 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
                 offset_loc += internal_bodylist[ip]->GetNumCoordsVelLevel();
             }
 
-            for (unsigned int ip = 0; ip < internal_meshlist.size(); ++ip) {
-                for (auto& node : internal_meshlist[ip]->GetNodes()) {
-                    if (auto xyz = std::dynamic_pointer_cast<ChNodeFEAxyz>(node)) {
-                        m_full_forces_internal.segment(offset_loc, 3) = xyz->GetForce().eigen();
-                        offset_loc += xyz->GetNumCoordsVelLevel();
-                    }
-                    if (auto xyzrot = std::dynamic_pointer_cast<ChNodeFEAxyzrot>(node)) {
-                        m_full_forces_internal.segment(offset_loc, 3) = xyzrot->GetForce().eigen();
-                        m_full_forces_internal.segment(offset_loc + 3, 3) = xyzrot->GetTorque().eigen();
-                        offset_loc += xyzrot->GetNumCoordsVelLevel();
-                    }
+            // each node by its type found once (m_internal_nodes)
+            for (const auto& node : m_internal_nodes) {
+                if (node.xyz) {
+                    m_full_forces_internal.segment(node.vel, 3) = node.xyz->GetForce().eigen();
+                } else {
+                    m_full_forces_internal.segment(node.vel, 3) = node.xyzrot->GetForce().eigen();
+                    m_full_forces_internal.segment(node.vel + 3, 3) = node.xyzrot->GetTorque().eigen();
                 }
             }
         }
@@ -2675,27 +2704,32 @@ void ChModalAssembly::IntLoadResidual_F(const unsigned int off,  // offset in R 
         if (m_modal_automatic_gravity && GetSystem()->GetGravitationalAcceleration().Length2()) {
             // Each item's translation (m_coords_boundary, m_coords_internal): taking every item as a body's 6
             // coordinates left every other xyz node without its weight, and the rest's misplaced
-            std::vector<unsigned int> offsets_transl;
-            for (const auto& item : m_coords_boundary)
-                offsets_transl.push_back(item.vel);
-            for (const auto& item : m_coords_internal)
-                offsets_transl.push_back(m_num_coords_vel_boundary + item.vel);
             ChVector3d gloc = floating_frame_F.GetRot().RotateBack(GetSystem()->GetGravitationalAcceleration());
 
-            // gravitational forces for all boundary and internal items: full_M_loc times gloc on every item's
-            // translation, by its three columns (m_gravity_M_loc)
-            ChVectorDynamic<> f_gravity;
-            f_gravity.setZero(m_num_coords_vel_boundary + m_num_coords_vel_internal);
-            ChVectorDynamic<> f_gravity_loc = m_gravity_M_loc * gloc.eigen();
-            for (unsigned int at : offsets_transl)
-                f_gravity.segment(at, 3) = floating_frame_F.GetRot().Rotate(f_gravity_loc.segment(at, 3)).eigen();
+            // the gravity load for boundary bodies and nodes: full_M_loc times gloc on every item's translation, by
+            // its three columns (m_gravity_M_loc), turned out of F's axes
+            for (const auto& item : m_coords_boundary) {
+                ChVector3d f_loc(m_gravity_M_loc.block(item.vel, 0, 3, 3) * gloc.eigen());
+                R.segment(off + item.vel, 3) += c * floating_frame_F.GetRot().Rotate(f_loc).eigen();
+            }
 
-            // only add the gravitational forces for internal part since it has been inherited from the parent methods
-            // for the boundary part
-            m_full_forces_internal.tail(m_num_coords_vel_internal) += f_gravity.tail(m_num_coords_vel_internal);
-
-            // add the gravity load for boundary bodies and nodes.
-            R.segment(off, m_num_coords_vel_boundary) += c * f_gravity.head(m_num_coords_vel_boundary);
+            if (m_gravity_red.rows()) {
+                // the internal part's, reduced at the reduction's end (m_gravity_red): turned as step 5 turns the
+                // forces it reduces
+                ChVectorDynamic<> f_reduced = m_gravity_red * gloc.eigen();
+                for (unsigned int i_node = 0; i_node < m_num_coords_vel_boundary / 6; ++i_node)
+                    f_reduced.segment(6 * i_node, 3) =
+                        floating_frame_F.GetRot().Rotate(ChVector3d(f_reduced.segment(6 * i_node, 3))).eigen();
+                R.segment(off, m_num_coords_vel_boundary + m_num_coords_modal) += c * f_reduced;
+            } else {
+                // with the static correction mode, which takes them, among the forces on the internal nodes
+                for (const auto& item : m_coords_internal) {
+                    ChVector3d f_loc(m_gravity_M_loc.block(m_num_coords_vel_boundary + item.vel, 0, 3, 3) *
+                                     gloc.eigen());
+                    m_full_forces_internal.segment(item.vel, 3) +=
+                        floating_frame_F.GetRot().Rotate(f_loc).eigen();
+                }
+            }
 
             // remove the duplicated gravity load of boundary bodies (ChBoby) since it has been included in the parent
             // method ChAssembly::IntLoadResidual_F().

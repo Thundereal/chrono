@@ -27,6 +27,11 @@
 #include <type_traits>
 
 namespace chrono {
+namespace fea {
+class ChNodeFEAxyz;
+class ChNodeFEAxyzrot;
+}  // end namespace fea
+
 namespace modal {
 
 /// @addtogroup modal
@@ -620,6 +625,12 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// coordinates), and a reduction's data (ReducedData) need not carry it.
     void ComputeGravityMass();
 
+    /// The internal items' gravity columns of m_gravity_M_loc (their translations) reduced, [Psi_S; Psi_D]^T times
+    /// them, as m_gravity_red, at a reduction's end: the internal part's modal gravity is these times the gravity in
+    /// F's axes, where it was the whole internal vector made, turned and reduced at each residual. Empty with the
+    /// static correction mode, whose Psi_Cor changes with the forces, and which takes them in m_full_forces_internal.
+    void ComputeGravityReduced();
+
     /// A reduction's start, before its matrices: the assembly set up and initialized (its floating frame), the meshes'
     /// own gravity off when the modal assembly's is on.
     void PrepareReduction();
@@ -728,7 +739,16 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     std::vector<ItemCoords> m_coords_boundary;  ///< the boundary's bodies and nodes, set up by Setup()
     std::vector<ItemCoords> m_coords_internal;  ///< the internal ones
 
-    /// Sets up m_coords_boundary and m_coords_internal.
+    /// An internal mesh's node whose force is read at each residual, by its type found once: the cast of each node at
+    /// each residual was most of a fine mesh's step.
+    struct InternalNode {
+        fea::ChNodeFEAxyz* xyz;        ///< the node, if it is an xyz one
+        fea::ChNodeFEAxyzrot* xyzrot;  ///< or if it is an xyzrot one
+        unsigned int vel;              ///< its first velocity coordinate, from the first internal one
+    };
+    std::vector<InternalNode> m_internal_nodes;  ///< set up by SetupItemCoords()
+
+    /// Sets up m_coords_boundary, m_coords_internal and m_internal_nodes.
     void SetupItemCoords();
 
     /// The internal coordinates' vector with each item's translation turned by the floating frame F: to its axes
@@ -738,6 +758,7 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     // full system matrices in the local floating frame of reference F
     ChSparseMatrix full_M_loc;
     ChMatrixDynamic<> m_gravity_M_loc;  // full_M_loc's gravity columns (ComputeGravityMass())
+    ChMatrixDynamic<> m_gravity_red;    // the internal part's gravity columns reduced (ComputeGravityReduced())
     ChSparseMatrix full_K_loc;
     ChSparseMatrix full_R_loc;  // not assembled: nothing reads it (ComputeLocalFullKMCqMatrices())
     ChSparseMatrix full_Cq_loc;
