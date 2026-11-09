@@ -20,6 +20,7 @@
 #include "chrono_modal/ChModalSolverUndamped.h"
 #include "chrono_modal/ChModalSolverUndamped.h"
 #include "chrono_modal/ChModalSolverDamped.h"
+#include "chrono_modal/ChSymGenEigenvalueSolver.h"
 #include "chrono/physics/ChAssembly.h"
 #include "chrono/solver/ChVariablesGeneric.h"
 #include <complex>
@@ -616,6 +617,14 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// Both Herting and Craig-Bampton reductions are implemented in this function.
     void ApplyModeAccelerationTransformation(const ChModalDamping& damping_model = ChModalDampingNone());
 
+    /// K_IIc (K_II with the internal constraints, Cq_II scaled by m_scaling_factor_CqI) factored in m_solver_invKIIc,
+    /// for the static modes' solves; m_invKIIc_factored set until ApplyModeAccelerationTransformation() takes it.
+    void FactorInternalStiffness();
+
+    /// y = A^{-1} x by the factored K_IIc, for the Craig-Bampton eigenproblem's A = [-K_II -a Cq_II'; -a Cq_II 0]
+    /// (BuildUndampedSystem(), a = scaling_Cq): its shift-and-invert at a zero shift, without a factorization of its own.
+    void SolveInternalStiffnessShifted(const double* x, double* y, double scaling_Cq);
+
     /// The boundary bodies' and nodes' masses set to zero, now in the reduced M (the end of a reduction).
     void RemoveBoundaryMasses();
 
@@ -687,6 +696,7 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     ChMatrixDynamic<> Psi_Cor_LambdaI;  ///< static correction mode - corresponding to internal Lagrange multipliers.
 
     std::shared_ptr<ChDirectSolverLS> m_solver_invKIIc;  /// linear solver for K_IIc^{-1}
+    bool m_invKIIc_factored = false;                     /// K_IIc factored for this reduction (FactorInternalStiffness())
 
     // Results of eigenvalue analysis like ComputeModes() or ComputeModesDamped():
     ChMatrixDynamic<std::complex<double>> m_modal_eigvect;  // eigenvectors
@@ -942,7 +952,23 @@ void ChModalAssembly::DoModalReduction(ChSparseMatrix& full_M,
         ComputeModesExternalData(full_M_loc, full_K_loc, full_Cq_loc, modal_solver);
 
     } else if (m_modal_reduction_type == ReductionType::CRAIG_BAMPTON) {
-        ComputeModesExternalData(M_II_loc, K_II_loc, Cq_II_loc, modal_solver);
+        // K_IIc factored once: for the static modes, and for a Krylov-Schur eigensolver's shift-and-invert at a zero
+        // shift, the same matrix -- a K_II the static modes can solve with has no zero frequency to shift off
+        FactorInternalStiffness();
+        if constexpr (std::is_base_of_v<ChSymGenEigenvalueSolverKrylovSchur, EigensolverType>) {
+            struct Given {
+                ChSymGenEigenvalueSolverKrylovSchur& solver;
+                ~Given() { solver.shift_inverse = nullptr; }
+            } given{*modal_solver.GetEigenSolver()};
+            const double scaling_Cq = modal_solver.GetScaleCq() ? K_II_loc.diagonal().mean() : 1.0;
+            given.solver.shift_inverse_at = 0;
+            given.solver.shift_inverse = [this, scaling_Cq](const double* x, double* y) {
+                SolveInternalStiffnessShifted(x, y, scaling_Cq);
+            };
+            ComputeModesExternalData(M_II_loc, K_II_loc, Cq_II_loc, modal_solver);
+        } else {
+            ComputeModesExternalData(M_II_loc, K_II_loc, Cq_II_loc, modal_solver);
+        }
 
     } else {
         std::cerr << "Wrong modal reduction method requested." << std::endl;

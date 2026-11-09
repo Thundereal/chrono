@@ -558,6 +558,36 @@ void ChModalAssembly::PartitionLocalSystemMatrices() {
     full_M_loc_ext.makeCompressed();
 }
 
+void ChModalAssembly::FactorInternalStiffness() {
+    if (m_num_constr_internal) {
+        // K_IIc = [  K_II   Cq_II' ]
+        //         [ Cq_II     0    ]
+        ChSparseMatrix H_II;
+        util_sparse_assembly_2x2symm(H_II, K_II_loc, Cq_II_loc * m_scaling_factor_CqI);
+        m_solver_invKIIc->GetMatrix() = H_II;
+    } else {
+        m_solver_invKIIc->GetMatrix() = K_II_loc;
+    }
+    m_solver_invKIIc->SetupCurrent();
+    m_invKIIc_factored = true;
+}
+
+void ChModalAssembly::SolveInternalStiffnessShifted(const double* x, double* y, double scaling_Cq) {
+    // A = [ -K_II        -a Cq_II' ]  = -D K_IIc D,  D = [ I  0      ],  a = scaling_Cq, s = m_scaling_factor_CqI
+    //     [ -a Cq_II     0         ]                    [ 0  a/s I  ]
+    // so A^{-1} x = -D^{-1} K_IIc^{-1} D^{-1} x
+    const Eigen::Index n_I = m_num_coords_vel_internal;
+    const Eigen::Index n_L = m_num_constr_internal;
+    const double r = n_L ? m_scaling_factor_CqI / scaling_Cq : 1.0;
+    ChVectorDynamic<>& b = m_solver_invKIIc->b();
+    b = Eigen::Map<const ChVectorDynamic<>>(x, n_I + n_L);
+    b.tail(n_L) *= r;
+    m_solver_invKIIc->SolveCurrent();
+    Eigen::Map<ChVectorDynamic<>> out(y, n_I + n_L);
+    out = -m_solver_invKIIc->x();
+    out.tail(n_L) *= r;
+}
+
 void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& damping_model) {
     if (m_modal_reduction_type == ReductionType::HERTING && m_modal_eigvect.cols() < 6) {
         std::cerr << "ChModalAssembly: at least six rigid-body modes are required for Herting reduction method"
@@ -574,18 +604,11 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
                 "Error: it is forbidden to use AddLink() to connect internal bodies/nodes in ChModalAssembly().");
     }
 
-    // avoid computing K_IIc^{-1}, effectively do n times a linear solve:
-    ChSparseMatrix H_II;
-    if (m_num_constr_internal) {
-        // K_IIc = [  K_II   Cq_II' ]
-        //         [ Cq_II     0    ]
-        util_sparse_assembly_2x2symm(H_II, K_II_loc, Cq_II_loc * m_scaling_factor_CqI);
-        m_solver_invKIIc->GetMatrix() = H_II;
-        m_solver_invKIIc->SetupCurrent();
-    } else {
-        m_solver_invKIIc->GetMatrix() = K_II_loc;
-        m_solver_invKIIc->SetupCurrent();
-    }
+    // avoid computing K_IIc^{-1}, effectively do n times a linear solve -- factored here, or before the eigensolver
+    // (DoModalReduction())
+    if (!m_invKIIc_factored)
+        FactorInternalStiffness();
+    m_invKIIc_factored = false;
 
     // 1) Matrix of static modes (constrained, so use K_IIc instead of K_II,
     // the original unconstrained static reduction is: Psi_S = - K_II^{-1} * K_IB.
@@ -834,6 +857,7 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
 }
 
 void ChModalAssembly::PrepareReduction() {
+    m_invKIIc_factored = false;
     SetupInitial();
     Setup();
     Update(ChTime, UpdateFlags::UPDATE_ALL);

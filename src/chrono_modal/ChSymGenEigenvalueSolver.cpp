@@ -74,6 +74,24 @@ class KrylovSchurGEigsShiftInvert : public KrylovSchurGEigsBase<SymGEigsShiftInv
         : Base(set_shift_and_move(ModeMatOp(op, Bop), sigma), Bop, nev, ncv), m_sigma(sigma) {}
 };
 
+// (A - sigma B)^{-1} by a factorization made elsewhere (ChSymGenEigenvalueSolverKrylovSchur::shift_inverse)
+class GivenShiftInvert {
+  public:
+    using Scalar = double;
+
+    GivenShiftInvert(const std::function<void(const double*, double*)>& inverse, Eigen::Index n)
+        : m_inverse(inverse), m_n(n) {}
+
+    Eigen::Index rows() const { return m_n; }
+    Eigen::Index cols() const { return m_n; }
+    void set_shift(const Scalar&) {}
+    void perform_op(const Scalar* x_in, Scalar* y_out) const { m_inverse(x_in, y_out); }
+
+  private:
+    const std::function<void(const double*, double*)>& m_inverse;
+    Eigen::Index m_n;
+};
+
 void ChSymGenEigenvalueSolver::GetNaturalFrequencies(const ChVectorDynamic<ScalarType>& eigvals,
                                                      ChVectorDynamic<double>& freq) {
     freq.resize(eigvals.size());
@@ -99,11 +117,26 @@ int ChSymGenEigenvalueSolverKrylovSchur::Solve(const ChSparseMatrix& A,
         m = num_modes + 1;
 
     // Construct matrix operation objects using the wrapper classes
-    using OpType = SymShiftInvert<double, Eigen::Sparse, Eigen::Sparse>;
     using BOpType = SparseSymMatProd<double>;
-    OpType op(getColMajorSparseMatrix(A), getColMajorSparseMatrix(B));
     BOpType Bop(getColMajorSparseMatrix(B));
 
+    if (shift_inverse && shift == shift_inverse_at) {
+        GivenShiftInvert op(shift_inverse, A.rows());
+        return Run(op, Bop, eigvects, eigvals, num_modes, m, shift);
+    }
+    using OpType = SymShiftInvert<double, Eigen::Sparse, Eigen::Sparse>;
+    OpType op(getColMajorSparseMatrix(A), getColMajorSparseMatrix(B));
+    return Run(op, Bop, eigvects, eigvals, num_modes, m, shift);
+}
+
+template <typename OpType, typename BOpType>
+int ChSymGenEigenvalueSolverKrylovSchur::Run(OpType& op,
+                                             BOpType& Bop,
+                                             ChMatrixDynamic<ScalarType>& eigvects,
+                                             ChVectorDynamic<ScalarType>& eigvals,
+                                             int num_modes,
+                                             int m,
+                                             ScalarType shift) const {
     // The Krylov-Schur solver, using the shift and invert mode:
     KrylovSchurGEigsShiftInvert<OpType, BOpType> eigen_solver(op, Bop, num_modes, m, shift);
 
@@ -134,7 +167,7 @@ int ChSymGenEigenvalueSolverKrylovSchur::Solve(const ChSparseMatrix& A,
             std::cout << " niter   = " << eigen_solver.num_iterations() << std::endl;
             std::cout << " nops    = " << eigen_solver.num_operations() << std::endl;
             std::cout << " n_modes = " << num_modes << std::endl;
-            std::cout << " problem size  = " << A.rows() << std::endl;
+            std::cout << " problem size  = " << op.rows() << std::endl;
         }
     }
 

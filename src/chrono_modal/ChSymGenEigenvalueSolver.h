@@ -21,6 +21,7 @@
 #include <Eigen/SparseCore>
 
 #include <complex>
+#include <functional>
 
 namespace chrono {
 
@@ -83,6 +84,23 @@ class ChApiModal ChSymGenEigenvalueSolverKrylovSchur : public ChSymGenEigenvalue
                       ChVectorDynamic<ScalarType>& eigvals,
                       int num_modes,
                       ScalarType shift) const override;
+
+    /// y = (A - shift_inverse_at * B)^{-1} x by a factorization made elsewhere, taken in place of one of its own by a
+    /// solve at that shift: ChModalAssembly's Craig-Bampton reduction hands in its K_IIc's, which its static modes take
+    /// too, where the two were factored apiece (6 s each for a mesh of 93390 coordinates). Empty: its own.
+    std::function<void(const double* x, double* y)> shift_inverse;
+    ScalarType shift_inverse_at = 0;
+
+  private:
+    // The iteration, for either shift-and-invert operator
+    template <typename OpType, typename BOpType>
+    int Run(OpType& op,
+            BOpType& Bop,
+            ChMatrixDynamic<ScalarType>& eigvects,
+            ChVectorDynamic<ScalarType>& eigvals,
+            int num_modes,
+            int m,
+            ScalarType shift) const;
 };
 
 /// Generalized iterative eigenvalue solver implementing Lanczos shift-and-invert method for real symmetric matrices.

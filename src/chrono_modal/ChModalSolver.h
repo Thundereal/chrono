@@ -70,6 +70,9 @@ class ChApiModal ChModalSolver {
     /// Get the set of frequency spans for which modes are requested.
     const std::vector<ChFreqSpan>& GetFrequencySpans() const { return m_freq_spans; }
 
+    /// Whether the Cq matrix is scaled, by the mean of K's diagonal.
+    bool GetScaleCq() const { return m_scaleCq; }
+
     /// Get cumulative time for matrix assembly.
     double GetTimeMatrixAssembly() const { return m_timer_matrix_assembly(); }
 
