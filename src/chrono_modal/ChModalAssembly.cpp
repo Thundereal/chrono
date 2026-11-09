@@ -12,6 +12,7 @@
 // Authors: Alessandro Tasora
 // =============================================================================
 
+#include <algorithm>
 #include <cmath>
 
 #include "chrono_modal/ChModalAssembly.h"
@@ -476,31 +477,10 @@ void ChModalAssembly::ComputeProjectionMatrix() {
 void ChModalAssembly::ComputeLocalFullKMCqMatrices(ChSparseMatrix& full_M,
                                                    ChSparseMatrix& full_K,
                                                    ChSparseMatrix& full_Cq) {
-    ChSparseMatrix L_BI;
-
-    unsigned int n_v = full_M.rows();
-    L_BI.resize(n_v, n_v);
-    L_BI.reserve(2 * n_v);  // n_v/6 nodes, 12 nonzeros in R_F and I33 for one node
-    L_BI.setZero();
-
-    // Each item's translation turned by R_F, the rest kept (I)
-    auto turn = [&](const std::vector<ItemCoords>& items, unsigned int start) {
-        for (const auto& item : items) {
-            const unsigned int at = start + item.vel;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    L_BI.insert(at + r, at + c) = floating_frame_F.GetRotMat()(r, c);  // R_F
-            for (unsigned int k = 3; k < item.nvel; ++k)
-                L_BI.insert(at + k, at + k) = 1.0;
-        }
-    };
-    turn(m_coords_boundary, 0);
-    turn(m_coords_internal, m_num_coords_vel_boundary);
-    L_BI.makeCompressed();
-
-    full_M_loc = L_BI.transpose() * full_M * L_BI;
-    full_K_loc = L_BI.transpose() * full_K * L_BI;
-    full_Cq_loc = full_Cq * L_BI;
+    // Each item's translation turned by R_F, the rest kept: L^T M L, L^T K L and Cq L, block by block (TurnToLocal())
+    full_M_loc = TurnToLocal(full_M, true);
+    full_K_loc = TurnToLocal(full_K, true);
+    full_Cq_loc = TurnToLocal(full_Cq, false);
 
     full_M_loc.makeCompressed();
     full_K_loc.makeCompressed();
@@ -2098,6 +2078,89 @@ ChVectorDynamic<> ChModalAssembly::TurnInternal(const ChVectorDynamic<>& v, bool
         out.segment(item.vel, 3) =
             (back ? floating_frame_F.GetRot().RotateBack(t) : floating_frame_F.GetRot().Rotate(t)).eigen();
     }
+    return out;
+}
+
+ChSparseMatrix ChModalAssembly::TurnToLocal(const ChSparseMatrix& A, bool both) const {
+    const ChMatrix33<>& R = floating_frame_F.GetRotMat();
+    const int n_v = static_cast<int>(A.cols());
+
+    // Each coordinate's group: its item's translation (three, turned) or itself
+    std::vector<int> start(n_v);
+    std::vector<int> size(n_v, 1);
+    for (int i = 0; i < n_v; ++i)
+        start[i] = i;
+    auto mark = [&](const std::vector<ItemCoords>& items, unsigned int from) {
+        for (const auto& item : items) {
+            const int at = static_cast<int>(from + item.vel);
+            if (at + 3 > n_v)
+                continue;
+            for (int k = 0; k < 3; ++k) {
+                start[at + k] = at;
+                size[at + k] = 3;
+            }
+        }
+    };
+    mark(m_coords_boundary, 0);
+    mark(m_coords_internal, m_num_coords_vel_boundary);
+
+    ChSparseMatrix out(A.rows(), A.cols());
+    out.reserve(A.nonZeros() + A.nonZeros() / 4);
+    std::vector<int> slot(n_v, -1);   // a column group's block among the row group's, or -1
+    std::vector<int> touched;         // the row group's column groups
+    std::vector<double> blocks;       // their 3x3 blocks, row-major, by slot
+    const int rows = static_cast<int>(A.rows());
+    for (int r = 0; r < rows;) {
+        const int rs = both ? size[r] : 1;
+        touched.clear();
+        blocks.clear();
+        for (int a = 0; a < rs; ++a) {
+            for (ChSparseMatrix::InnerIterator it(A, r + a); it; ++it) {
+                const int J = start[it.col()];
+                if (slot[J] < 0) {
+                    slot[J] = static_cast<int>(touched.size());
+                    touched.push_back(J);
+                    blocks.resize(blocks.size() + 9, 0.0);
+                }
+                blocks[9 * slot[J] + 3 * a + (it.col() - J)] += it.value();
+            }
+        }
+        // Each block turned: B R_F on a translation's columns, R_F^T B on its rows
+        for (int J : touched) {
+            double* B = &blocks[9 * slot[J]];
+            if (size[J] == 3) {
+                for (int a = 0; a < rs; ++a) {
+                    double row[3];
+                    for (int b = 0; b < 3; ++b)
+                        row[b] = B[3 * a] * R(0, b) + B[3 * a + 1] * R(1, b) + B[3 * a + 2] * R(2, b);
+                    for (int b = 0; b < 3; ++b)
+                        B[3 * a + b] = row[b];
+                }
+            }
+            if (rs == 3) {
+                for (int b = 0; b < size[J]; ++b) {
+                    double col[3];
+                    for (int a = 0; a < 3; ++a)
+                        col[a] = R(0, a) * B[b] + R(1, a) * B[3 + b] + R(2, a) * B[6 + b];
+                    for (int a = 0; a < 3; ++a)
+                        B[3 * a + b] = col[a];
+                }
+            }
+        }
+        std::sort(touched.begin(), touched.end());
+        for (int a = 0; a < rs; ++a) {
+            out.startVec(r + a);
+            for (int J : touched) {
+                const double* B = &blocks[9 * slot[J]];
+                for (int b = 0; b < size[J]; ++b)
+                    out.insertBack(r + a, J + b) = B[3 * a + b];
+            }
+        }
+        for (int J : touched)
+            slot[J] = -1;
+        r += rs;
+    }
+    out.finalize();
     return out;
 }
 
