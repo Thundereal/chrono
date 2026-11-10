@@ -2161,6 +2161,95 @@ void ChModalAssembly::SetupItemCoords() {
             vel += node->GetNumCoordsVelLevel();
         }
     }
+
+    // Each internal xyz node's item, as addAll() counts them: the active bodies, then every node
+    m_internal_node_items.clear();
+    size_t item = 0;
+    for (auto& body : internal_bodylist) {
+        if (body->IsActive())
+            ++item;
+    }
+    for (auto& mesh : internal_meshlist) {
+        for (auto& node : mesh->GetNodes()) {
+            if (auto xyz = dynamic_cast<ChNodeFEAxyz*>(node.get()))
+                m_internal_node_items[xyz] = item;
+            ++item;
+        }
+    }
+}
+
+bool ChModalAssembly::GetInternalNodesMap(const std::vector<const fea::ChNodeFEAxyz*>& nodes,
+                                          std::vector<ChVector3d>& pos,
+                                          std::vector<ChVector3d>& vel,
+                                          std::vector<ChMatrixDynamic<>>& T) {
+    pos.clear();
+    vel.clear();
+    T.clear();
+    const unsigned int n_bou = m_num_coords_vel_boundary;
+    const unsigned int n_cor = m_num_coords_static_correction;
+    const unsigned int n_dyn = m_num_coords_modal - n_cor;
+    const unsigned int n_red = n_bou + m_num_coords_modal;
+    if (!m_is_model_reduced || Psi_S.cols() != n_bou || Psi_D.cols() != n_dyn)
+        return false;
+    std::vector<const ItemCoords*> items;
+    items.reserve(nodes.size());
+    for (const auto* node : nodes) {
+        auto it = m_internal_node_items.find(node);
+        if (it == m_internal_node_items.end() || it->second >= m_coords_internal.size())
+            return false;
+        const ItemCoords& at = m_coords_internal[it->second];
+        if (at.vel + 3 > Psi_S.rows() || m_num_coords_pos_boundary + at.pos + 3 > m_full_state_x0.size())
+            return false;
+        items.push_back(&at);
+    }
+
+    // The local deformation, and the reduced velocities, as UpdateInternalState() takes them
+    ChVectorDynamic<> u_locred;
+    ChVectorDynamic<> e_locred;
+    ChVectorDynamic<> edt_locred;
+    GetLocalDeformations(u_locred, e_locred, edt_locred);
+    double fooT;
+    ChState x_mod;
+    ChStateDelta v_mod;
+    x_mod.setZero(m_num_coords_pos_boundary + m_num_coords_modal, nullptr);
+    v_mod.setZero(n_red, nullptr);
+    IntStateGather(0, x_mod, 0, v_mod, fooT);
+
+    const ChMatrix33<>& R = floating_frame_F.GetRotMat();
+    for (const ItemCoords* at : items) {
+        // T: IntLoadResidual_F()'s map of a force f on the node, transposed -- f_loc = R_F^T f; each boundary's
+        // translation takes R_F Psi_S^T f_loc, its rotation Psi_S^T f_loc; the modes Psi_D^T f_loc
+        ChMatrixDynamic<> t(3, n_red);
+        t.setZero();
+        for (unsigned int b = 0; b + 6 <= n_bou; b += 6) {
+            t.block(0, b, 3, 3) = R * Psi_S.block(at->vel, b, 3, 3) * R.transpose();
+            t.block(0, b + 3, 3, 3) = R * Psi_S.block(at->vel, b + 3, 3, 3);
+        }
+        t.block(0, n_bou, 3, n_dyn) = R * Psi_D.block(at->vel, 0, 3, n_dyn);
+        if (n_cor && Psi_Cor.rows() == Psi_S.rows())
+            t.block(0, n_bou + n_dyn, 3, n_cor) = R * Psi_Cor.block(at->vel, 0, 3, n_cor);
+
+        ChVector3d d = Psi_S.block(at->vel, 0, 3, n_bou) * e_locred.head(n_bou) +
+                       Psi_D.block(at->vel, 0, 3, n_dyn) * e_locred.segment(n_bou, n_dyn);
+        if (n_cor && Psi_Cor.rows() == Psi_S.rows())
+            d += Psi_Cor.block(at->vel, 0, 3, n_cor) * e_locred.tail(n_cor);
+        const unsigned int offset = m_num_coords_pos_boundary + at->pos;
+        const ChVector3d r_IF0 = floating_frame_F0.GetRotMat().transpose() *
+                                 (m_full_state_x0.segment(offset, 3) - floating_frame_F0.GetPos().eigen());
+        pos.push_back(floating_frame_F.GetPos() + R * (r_IF0 + d));
+        vel.push_back(ChVector3d(t * v_mod));
+        T.push_back(std::move(t));
+    }
+    return true;
+}
+
+std::vector<ChVariables*> ChModalAssembly::GetReducedVariables() const {
+    std::vector<ChVariables*> out;
+    if (!m_is_model_reduced)
+        return out;
+    for (size_t m = 0; m < modal_Hblock.GetNumVariables(); ++m)
+        out.push_back(modal_Hblock.GetVariable(static_cast<unsigned int>(m)));
+    return out;
 }
 
 ChVectorDynamic<> ChModalAssembly::TurnInternal(const ChVectorDynamic<>& v, bool back) const {

@@ -26,6 +26,7 @@
 #include <complex>
 #include <iomanip>
 #include <type_traits>
+#include <unordered_map>
 
 namespace chrono {
 namespace fea {
@@ -158,6 +159,22 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// velocity is taken from the boundary's and the modes' (P_F Q_0, UpdateFloatingFrameOfReference()), from their
     /// accelerations; the rate of that map, a small deformation's, left out. Only when reduced (boundary bodies).
     ChVectorDynamic<> GetFloatingFrameAccelerations() const;
+
+    /// Internal xyz nodes' places and their maps onto the reduced coordinates, at the current state. Each node's
+    /// position, F + R_F (r0 + Psi_S e_B + Psi_D eta), r0 its place in F0's axes before the reduction, as
+    /// UpdateInternalState() puts it; its map T, 3 x (boundary + modal), whose transpose takes a force on it to the
+    /// reduced coordinates as IntLoadResidual_F() takes the internal nodes' forces, and which times the reduced
+    /// velocities is its velocity, given too. For a force on the mesh that is not a node's own load -- a contact's,
+    /// stiff, whose T^T K T an item of its own puts in the system matrix, where a node's force enters the residual
+    /// only. False unless reduced and every node an internal xyz one of this assembly.
+    bool GetInternalNodesMap(const std::vector<const fea::ChNodeFEAxyz*>& nodes,
+                             std::vector<ChVector3d>& pos,
+                             std::vector<ChVector3d>& vel,
+                             std::vector<ChMatrixDynamic<>>& T);
+
+    /// The reduced model's variables, as its system matrix block has them: the active boundary ones, then the modal
+    /// ones -- the order of the reduced coordinates and of T's columns (GetInternalNodesMap()). Only when reduced.
+    std::vector<ChVariables*> GetReducedVariables() const;
 
     /// Get the residual of constraint equations on the floating frame F.
     /// The configuration of the floating frame F is determined by the six constraint equations using a Newton-Raphson
@@ -776,6 +793,8 @@ class ChApiModal ChModalAssembly : public ChAssembly {
         unsigned int vel;              ///< its first velocity coordinate, from the first internal one
     };
     std::vector<InternalNode> m_internal_nodes;  ///< set up by SetupItemCoords()
+    /// Each internal xyz node's index in m_coords_internal, set up by SetupItemCoords() (GetInternalNodesMap())
+    std::unordered_map<const fea::ChNodeFEAxyz*, size_t> m_internal_node_items;
 
     /// Sets up m_coords_boundary, m_coords_internal and m_internal_nodes.
     void SetupItemCoords();
