@@ -844,6 +844,7 @@ void ChModalAssembly::ApplyModeAccelerationTransformation(const ChModalDamping& 
             this->R_red(row, col) = this->R_red(col, row);
         }
 
+    ComputeInertialResidualModes();
     RemoveBoundaryMasses();
     ComputeGravityReduced();
 
@@ -892,6 +893,7 @@ ChModalAssembly::ReducedData ChModalAssembly::GetReducedData() const {
     data.R_red = R_red;
     data.gravity_M_loc = m_gravity_M_loc;
     data.scaling_factor_CqI = m_scaling_factor_CqI;
+    data.Psi_R = Psi_R;
     return data;
 }
 
@@ -933,6 +935,9 @@ void ChModalAssembly::DoModalReduction(const ReducedData& data) {
     R_red = data.R_red;
     m_gravity_M_loc = data.gravity_M_loc;
     m_scaling_factor_CqI = data.scaling_factor_CqI;
+    if (data.Psi_R.size() && data.Psi_R.rows() != n_I)
+        throw std::invalid_argument("The reduction's data are not this assembly's: their sizes differ.");
+    Psi_R = data.Psi_R;
 
     RemoveBoundaryMasses();
     ComputeGravityReduced();
@@ -950,6 +955,71 @@ void ChModalAssembly::ComputeGravityMass() {
     for (const auto& item : m_coords_internal)
         unit.block(m_num_coords_vel_boundary + item.vel, 0, 3, 3).setIdentity();
     m_gravity_M_loc = full_M_loc * unit;
+}
+
+void ChModalAssembly::ComputeInertialResidualModes() {
+    Psi_R.resize(0, 0);
+    if (!m_use_inertial_residual || m_modal_reduction_type != ReductionType::CRAIG_BAMPTON ||
+        m_num_coords_static_correction)
+        return;
+    const Eigen::Index n_I = m_num_coords_vel_internal;
+    const Eigen::Index n_L = m_num_constr_internal;
+    const Eigen::Index n_D = Psi_D.cols();
+
+    // The fields over each internal item's translation (GetInertialResidualModes()), r its position from F's origin in
+    // F's axes, as Uloc_I has it
+    ChMatrixDynamic<> fields;
+    fields.setZero(n_I, 12);
+    for (const auto& item : m_coords_internal) {
+        const Eigen::Index at = item.vel;
+        const ChVector3d r = floating_frame_F.GetRot().RotateBack(
+            ChVector3d(m_full_state_x.segment(m_num_coords_pos_boundary + item.pos, 3)) - floating_frame_F.GetPos());
+        const double x = r.x(), y = r.y(), z = r.z();
+        for (int k = 0; k < 3; ++k)
+            fields(at + k, k) = 1.0;
+        // e_k x r
+        fields(at + 1, 3) = -z;
+        fields(at + 2, 3) = y;
+        fields(at + 0, 4) = z;
+        fields(at + 2, 4) = -x;
+        fields(at + 0, 5) = -y;
+        fields(at + 1, 5) = x;
+        // the centripetal terms' fields
+        fields(at + 1, 6) = y;
+        fields(at + 2, 6) = z;
+        fields(at + 0, 7) = x;
+        fields(at + 2, 7) = z;
+        fields(at + 0, 8) = x;
+        fields(at + 1, 8) = y;
+        fields(at + 0, 9) = y;
+        fields(at + 1, 9) = x;
+        fields(at + 0, 10) = z;
+        fields(at + 2, 10) = x;
+        fields(at + 1, 11) = z;
+        fields(at + 2, 11) = y;
+    }
+    const ChMatrixDynamic<> loads = M_II_loc * fields;
+
+    // Their static displacements, the boundary held: K_IIc, factored for the static modes, still is
+    Psi_R.setZero(n_I, 12);
+    for (int c = 0; c < 12; ++c) {
+        ChVectorDynamic<> rhs(n_I + n_L);
+        if (n_L)
+            rhs << loads.col(c), Eigen::VectorXd::Zero(n_L);
+        else
+            rhs = loads.col(c);
+        m_solver_invKIIc->b() = rhs;
+        m_solver_invKIIc->SolveCurrent();
+        Psi_R.col(c) = m_solver_invKIIc->x().head(n_I);
+    }
+
+    // Less what the kept modes take of them statically: the reduced model at rest under those loads has
+    // K_DD q = Psi_D^T f (K_red's modal block, Psi_D^T K_II Psi_D)
+    if (n_D) {
+        const ChMatrixDynamic<> K_DD = K_red.block(m_num_coords_vel_boundary, m_num_coords_vel_boundary, n_D, n_D);
+        const ChMatrixDynamic<> q = K_DD.ldlt().solve(Psi_D.transpose() * loads);
+        Psi_R -= Psi_D * q;
+    }
 }
 
 void ChModalAssembly::ComputeGravityReduced() {

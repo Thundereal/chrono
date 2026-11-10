@@ -118,6 +118,7 @@ class ChApiModal ChModalAssembly : public ChAssembly {
         ChMatrixDynamic<> M_red, K_red, R_red;
         ChMatrixDynamic<> gravity_M_loc;  ///< the local mass's gravity columns (ComputeGravityMass())
         double scaling_factor_CqI = 1.0;
+        ChMatrixDynamic<> Psi_R;  ///< the inertia loads' residual modes (GetInertialResidualModes()), or none
     };
 
     /// The reduction's data, after DoModalReduction(), for the same assembly reduced again (DoModalReduction(const
@@ -175,6 +176,21 @@ class ChApiModal ChModalAssembly : public ChAssembly {
 
     ///  Get the flag whether the static correction is used.
     bool GetUsetStaticCorrection() { return static_cast<bool>(m_num_coords_static_correction); }
+
+    /// Set whether a Craig-Bampton reduction also makes the residual modes of the inertia loads
+    /// (GetInertialResidualModes()), for recovering the deformation and the stresses the kept modes leave out -- the
+    /// mode-acceleration method. They do not enter the reduced model. By default false; not with the static correction.
+    void SetUseInertialResidual(bool flag) { m_use_inertial_residual = flag; }
+
+    /// The residual modes of the inertia loads, after a Craig-Bampton reduction with SetUseInertialResidual(true):
+    /// n_I x 12, the internal items' static displacement with the boundary held, K_IIc^{-1} {M_II b; 0}, less what the
+    /// kept dynamic modes take of it statically, Psi_D K_DD^{-1} Psi_D^T M_II b -- for twelve fields b of a load per
+    /// unit mass over the items' translations, in F's axes, r an item's position from F's origin there at the
+    /// reduction: e_x, e_y, e_z; e_x x r, e_y x r, e_z x r; (0 y z), (x 0 z), (x y 0), (y x 0), (z 0 x), (0 z y).
+    /// A rigid motion of F (its acceleration a, angular velocity w, angular acceleration alpha, all in F's axes) and
+    /// the gravity g in F's axes load the items by g - a - alpha x r - w x (w x r): the fields' coefficients are
+    /// g - a, -alpha, and wx^2, wy^2, wz^2, -wx wy, -wx wz, -wy wz. Empty when not made.
+    const ChMatrixDynamic<>& GetInertialResidualModes() const { return Psi_R; }
 
     /// A rigorous mathematical manipulation can be employed to derive the inertial forces and the consequent inertial
     /// damping matrix, or a linear assumption is applied to obtain quite concise expressions.
@@ -640,6 +656,9 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     /// static correction mode, whose Psi_Cor changes with the forces, and which takes them in m_full_forces_internal.
     void ComputeGravityReduced();
 
+    /// Psi_R (GetInertialResidualModes()) at a Craig-Bampton reduction's end, by K_IIc's factorization there.
+    void ComputeInertialResidualModes();
+
     /// A reduction's start, before its matrices: the assembly set up and initialized (its floating frame), the meshes'
     /// own gravity off when the modal assembly's is on.
     void PrepareReduction();
@@ -775,6 +794,8 @@ class ChApiModal ChModalAssembly : public ChAssembly {
     ChSparseMatrix full_M_loc;
     ChMatrixDynamic<> m_gravity_M_loc;  // full_M_loc's gravity columns (ComputeGravityMass())
     ChMatrixDynamic<> m_gravity_red;    // the internal part's gravity columns reduced (ComputeGravityReduced())
+    bool m_use_inertial_residual = false;  // SetUseInertialResidual()
+    ChMatrixDynamic<> Psi_R;               // the inertia loads' residual modes (ComputeInertialResidualModes())
     ChSparseMatrix full_K_loc;
     ChSparseMatrix full_R_loc;  // not assembled: nothing reads it (ComputeLocalFullKMCqMatrices())
     ChSparseMatrix full_Cq_loc;
