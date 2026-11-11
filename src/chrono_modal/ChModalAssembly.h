@@ -172,6 +172,22 @@ class ChApiModal ChModalAssembly : public ChAssembly {
                              std::vector<ChVector3d>& vel,
                              std::vector<ChMatrixDynamic<>>& T);
 
+    /// Internal xyz nodes' shapes, gathered once for places asked for often (GetInternalNodesPos()): r0, each
+    /// node's place in F0's axes before the reduction, three a node; Psi, their rows of Psi_S, Psi_D and the static
+    /// correction's, three rows a node, a column a reduced coordinate (GetInternalNodesMap()'s order).
+    struct NodesShapes {
+        ChVectorDynamic<> r0;
+        ChMatrixDynamic<> Psi;
+    };
+
+    /// Gathers those nodes' shapes. False unless reduced and every node an internal xyz one of this assembly.
+    bool GetInternalNodesShapes(const std::vector<const fea::ChNodeFEAxyz*>& nodes, NodesShapes& shapes) const;
+
+    /// The gathered nodes' places at the current state, F + R_F (r0 + Psi e), as GetInternalNodesMap() gives them
+    /// -- one product for all of them, for a surface's nodes moved each step where that one's maps would be most
+    /// of the work. False unless reduced and the shapes this reduction's.
+    bool GetInternalNodesPos(const NodesShapes& shapes, std::vector<ChVector3d>& pos);
+
     /// The reduced model's variables, as its system matrix block has them: the active boundary ones, then the modal
     /// ones -- the order of the reduced coordinates and of T's columns (GetInternalNodesMap()). Only when reduced.
     std::vector<ChVariables*> GetReducedVariables() const;

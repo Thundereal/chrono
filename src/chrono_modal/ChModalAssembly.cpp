@@ -2243,6 +2243,62 @@ bool ChModalAssembly::GetInternalNodesMap(const std::vector<const fea::ChNodeFEA
     return true;
 }
 
+bool ChModalAssembly::GetInternalNodesShapes(const std::vector<const fea::ChNodeFEAxyz*>& nodes,
+                                             NodesShapes& shapes) const {
+    const unsigned int n_bou = m_num_coords_vel_boundary;
+    const unsigned int n_cor = m_num_coords_static_correction;
+    const unsigned int n_dyn = m_num_coords_modal - n_cor;
+    const unsigned int n_red = n_bou + m_num_coords_modal;
+    shapes.r0.resize(0);
+    shapes.Psi.resize(0, 0);
+    if (!m_is_model_reduced || Psi_S.cols() != n_bou || Psi_D.cols() != n_dyn)
+        return false;
+    const bool corrected = n_cor && Psi_Cor.rows() == Psi_S.rows();
+    ChVectorDynamic<> r0(3 * nodes.size());
+    ChMatrixDynamic<> rows(3 * nodes.size(), n_red);
+    rows.setZero();
+    const ChMatrix33<> R0t = floating_frame_F0.GetRotMat().transpose();
+    unsigned int row = 0;
+    for (const auto* node : nodes) {
+        auto it = m_internal_node_items.find(node);
+        if (it == m_internal_node_items.end() || it->second >= m_coords_internal.size())
+            return false;
+        const ItemCoords& at = m_coords_internal[it->second];
+        if (at.vel + 3 > Psi_S.rows() || m_num_coords_pos_boundary + at.pos + 3 > m_full_state_x0.size())
+            return false;
+        rows.block(row, 0, 3, n_bou) = Psi_S.block(at.vel, 0, 3, n_bou);
+        rows.block(row, n_bou, 3, n_dyn) = Psi_D.block(at.vel, 0, 3, n_dyn);
+        if (corrected)
+            rows.block(row, n_bou + n_dyn, 3, n_cor) = Psi_Cor.block(at.vel, 0, 3, n_cor);
+        const unsigned int offset = m_num_coords_pos_boundary + at.pos;
+        r0.segment(row, 3) = R0t * (m_full_state_x0.segment(offset, 3) - floating_frame_F0.GetPos().eigen());
+        row += 3;
+    }
+    shapes.r0 = std::move(r0);
+    shapes.Psi = std::move(rows);
+    return true;
+}
+
+bool ChModalAssembly::GetInternalNodesPos(const NodesShapes& shapes, std::vector<ChVector3d>& pos) {
+    pos.clear();
+    const unsigned int n_red = m_num_coords_vel_boundary + m_num_coords_modal;
+    if (!m_is_model_reduced || shapes.Psi.cols() != n_red || shapes.Psi.rows() != shapes.r0.size())
+        return false;
+    ChVectorDynamic<> u_locred;
+    ChVectorDynamic<> e_locred;
+    ChVectorDynamic<> edt_locred;
+    GetLocalDeformations(u_locred, e_locred, edt_locred);
+    // e_locred is [boundary, modal], the modal ones the dynamic modes then the static correction's: Psi's columns
+    const ChVectorDynamic<> local = shapes.r0 + shapes.Psi * e_locred;
+    const ChMatrix33<>& R = floating_frame_F.GetRotMat();
+    const ChVector3d F = floating_frame_F.GetPos();
+    const unsigned int count = static_cast<unsigned int>(shapes.r0.size() / 3);
+    pos.reserve(count);
+    for (unsigned int i = 0; i < count; ++i)
+        pos.push_back(F + R * ChVector3d(local.segment(3 * i, 3)));
+    return true;
+}
+
 std::vector<ChVariables*> ChModalAssembly::GetReducedVariables() const {
     std::vector<ChVariables*> out;
     if (!m_is_model_reduced)
