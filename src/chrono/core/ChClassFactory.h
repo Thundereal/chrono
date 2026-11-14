@@ -30,6 +30,7 @@
 #include <string>
 #include <functional>
 #include <typeindex>
+#include <type_traits>
 #include <unordered_map>
 #include <memory>
 
